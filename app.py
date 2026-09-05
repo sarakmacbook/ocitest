@@ -5,6 +5,7 @@ import random
 import threading
 import datetime
 import functools
+import hmac
 import requests
 from flask import Flask, render_template, request, jsonify, Response
 import oci
@@ -47,7 +48,8 @@ ADMIN_PASSWORD = os.environ.get('APP_PASSWORD')
 if not ADMIN_PASSWORD:
     print("WARNING: APP_PASSWORD not set. Running WITHOUT authentication. Set APP_PASSWORD to enable Basic Auth.")
 
-MAX_ATTEMPTS = int(os.environ.get('MAX_ATTEMPTS', 100))
+# Max provisioning-loop attempts before giving up. 0 (default) == unlimited.
+MAX_ATTEMPTS = int(os.environ.get('MAX_ATTEMPTS', 0))
 
 APP_VERSION = "5.0.2"
 
@@ -183,7 +185,8 @@ def require_auth(f):
         if not ADMIN_PASSWORD:
             return f(*args, **kwargs)
         auth = request.authorization
-        if not auth or auth.password != ADMIN_PASSWORD:
+        # Constant-time compare to avoid leaking the password via timing.
+        if not auth or not auth.password or not hmac.compare_digest(auth.password, ADMIN_PASSWORD):
             return Response(
                 'Authentication required',
                 401,
@@ -964,6 +967,17 @@ def run_automated_creation(config, account_config, compute_client, network_clien
     oci_username = None
     target_region = config.get('region', 'unknown')
     target_name = account_config.get('display_name', 'AlwaysFree-Bot')
+    # Honor MAX_ATTEMPTS cap. 0 or negative == unlimited. A per-request override
+    # may be supplied via account_config['max_attempts'].
+    max_attempts = MAX_ATTEMPTS
+    req_max = account_config.get('max_attempts')
+    if req_max:
+        try:
+            req_max = int(req_max)
+            if req_max > 0:
+                max_attempts = req_max
+        except (ValueError, TypeError):
+            pass
     try:
         oci_username = get_oci_username(config, identity_client)
         if oci_username:
@@ -1062,6 +1076,9 @@ def run_automated_creation(config, account_config, compute_client, network_clien
             if stop_event.is_set():
                 add_log("Provisioning loop stopped by user.")
                 break
+            if max_attempts and attempts > max_attempts:
+                add_log(f"Reached MAX_ATTEMPTS ({max_attempts}). Stopping provisioning loop.")
+                break
             current_ad = ad_list[ad_index % len(ad_list)] if ad_list else ''
             if len(ad_list) > 1:
                 add_log(f"Attempt {attempts}: trying AD '{current_ad}'...")
@@ -1122,16 +1139,16 @@ def run_automated_creation(config, account_config, compute_client, network_clien
                     add_log(f"  4. Check OCI Console > Instances > Create — test manually")
                     if len(ad_list) > 1:
                         ad_index += 1
-                        add_log(f"Trying next AD...")
-                        continue
-                    break
+                        add_log(f"Trying next AD after delay...")
+                    else:
+                        break
                 else:
                     add_log(f"OCI API error: {e.message}")
                     if len(ad_list) > 1:
                         ad_index += 1
-                        add_log(f"Trying next AD...")
-                        continue
-                    break
+                        add_log(f"Trying next AD after delay...")
+                    else:
+                        break
             except (ConnectionError, OSError) as e:
                 user_info = f" [user: {oci_username}]" if oci_username else ""
                 add_log(f"Connection issue in '{target_region}': {type(e).__name__}.{user_info} Retrying...")
