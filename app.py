@@ -49,6 +49,62 @@ if not ADMIN_PASSWORD:
 
 MAX_ATTEMPTS = int(os.environ.get('MAX_ATTEMPTS', 100))
 
+APP_VERSION = "5.0.2"
+
+# ---- Keep-alive: self-ping so free-tier hosts (Render etc.) never sleep ----
+def _env_bool(name, default):
+    val = os.environ.get(name)
+    if val is None or val.strip() == '':
+        return default
+    return val.strip().lower() in ('1', 'true', 'yes', 'on')
+
+KEEP_ALIVE_ENABLED = _env_bool('KEEP_ALIVE', True)
+try:
+    KEEP_ALIVE_INTERVAL = max(60, int(os.environ.get('KEEP_ALIVE_INTERVAL', 600)))
+except ValueError:
+    KEEP_ALIVE_INTERVAL = 600
+# Explicit KEEP_ALIVE_URL wins; Render injects RENDER_EXTERNAL_URL automatically.
+KEEP_ALIVE_URL = (os.environ.get('KEEP_ALIVE_URL') or os.environ.get('RENDER_EXTERNAL_URL') or '').strip().rstrip('/')
+
+keep_alive_lock = threading.Lock()
+keep_alive_thread = None
+
+def _ka_log(msg):
+    print(f"[keep-alive] {msg}", flush=True)
+
+def keep_alive_worker():
+    # Give the web server a moment to bind its port before the first ping.
+    time.sleep(10)
+    _ka_log(f"pinger running: GET {KEEP_ALIVE_URL}/health every {KEEP_ALIVE_INTERVAL}s")
+    while True:
+        try:
+            r = requests.get(f"{KEEP_ALIVE_URL}/health", timeout=15)
+            if r.status_code == 200:
+                _ka_log(f"ping OK -> {KEEP_ALIVE_URL}/health")
+            else:
+                _ka_log(f"ping returned HTTP {r.status_code} -> {KEEP_ALIVE_URL}/health")
+        except Exception as e:
+            _ka_log(f"ping failed ({str(e)[:120]}); retrying in {KEEP_ALIVE_INTERVAL}s")
+        time.sleep(KEEP_ALIVE_INTERVAL)
+
+def start_keep_alive():
+    """Idempotently start (or re-arm) the self-ping daemon. Returns True if running."""
+    global keep_alive_thread
+    if not KEEP_ALIVE_ENABLED:
+        return False
+    if not KEEP_ALIVE_URL:
+        _ka_log("enabled but no URL to ping (set KEEP_ALIVE_URL, or deploy on Render where "
+                "RENDER_EXTERNAL_URL is auto-detected); pinger idle")
+        return False
+    with keep_alive_lock:
+        if keep_alive_thread is not None and keep_alive_thread.is_alive():
+            return True
+        keep_alive_thread = threading.Thread(target=keep_alive_worker, name="keep-alive", daemon=True)
+        keep_alive_thread.start()
+    return True
+
+start_keep_alive()
+
 # ---- Shared state ----
 global_logs = []
 logs_lock = threading.Lock()
@@ -139,7 +195,20 @@ def require_auth(f):
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok'}), 200
+    # Idempotent: re-arms the self-ping daemon if it ever died.
+    start_keep_alive()
+    return jsonify({
+        'status': 'ok',
+        'version': APP_VERSION,
+        'keep_alive': KEEP_ALIVE_ENABLED,
+        'keep_alive_url': KEEP_ALIVE_URL or None,
+        'keep_alive_interval': KEEP_ALIVE_INTERVAL
+    }), 200
+
+
+@app.route('/api/version')
+def api_version():
+    return jsonify({'version': APP_VERSION}), 200
 
 
 @app.route('/')

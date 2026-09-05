@@ -1,4 +1,4 @@
-# 🎯 OCI Sniper v5.0.1
+# 🎯 OCI Sniper v5.0.2
 
 Always-Free instance grabber & manager for Oracle Cloud Infrastructure (OCI).
 
@@ -6,9 +6,15 @@ A self-hosted Flask web panel that hunts down OCI Always Free capacity (A1.Flex 
 
 Formerly "OCI Provisioner". Same codebase, sharper aim: it sits scoped on your tenancy and fires the second free-tier capacity opens.
 
+<a href="https://render.com/deploy?repo=https://github.com/sarakmacbook/ocitest">
+  <img src="https://render.com/images/deploy-button.svg" alt="Deploy to Render" width="200">
+</a>
+
 <a href="https://railway.com/deploy/oracle-cloud-instance?referralCode=MPoxuF&utm_medium=integration&utm_source=template&utm_campaign=generic">
   <img src="https://railway.com/button.svg" alt="Deploy on Railway" width="200">
 </a>
+
+> 🟢 **Free 24/7 on Render** — ships with a built-in keep-alive self-ping, a `render.yaml` blueprint and health checks, so the free instance never sleeps. Full guide: **[Deploy on Render (free, 24/7)](#deploy-on-render-free-247)**.
 
 ## Features
 
@@ -21,14 +27,71 @@ Formerly "OCI Provisioner". Same codebase, sharper aim: it sits scoped on your t
 - 🕙 **Keep-alive pinger** — built-in self-ping keeps free-tier hosts (Render etc.) awake 24/7
 - 🔐 **Hardened auth** — Basic Auth (constant-time compare), per-IP rate limiting, fail-closed without password
 
-## Quick deploy
+## Deploy on Render (free, 24/7)
 
-### Render (free 24/7 with keep-alive)
+Render's free plan spins a web service **down after 15 minutes without inbound traffic** — deadly for a sniper that has to fire the second capacity appears. This repo ships everything needed to stay awake on the free tier: a **built-in self-ping daemon**, a **`render.yaml` blueprint** with health checks, and a recommended external-pinger backup.
 
-1. Push this repo to GitHub → Render → **New Web Service** → connect repo
-2. Environment: **Docker** (uses the included Dockerfile)
-3. Add env var: `APP_PASSWORD` = your password
-4. Deploy. Keep-alive auto-detects `RENDER_EXTERNAL_URL` and self-pings every 10 min so the service never sleeps.
+<a href="https://render.com/deploy?repo=https://github.com/sarakmacbook/ocitest">
+  <img src="https://render.com/images/deploy-button.svg" alt="Deploy to Render" width="200">
+</a>
+
+### Option A — one-click (Blueprint)
+
+1. Push this repo to your own GitHub (fork it if it isn't yours).
+2. Click the **Deploy to Render** button above and sign in with GitHub — Render reads the included `render.yaml`.
+3. When prompted for `APP_PASSWORD`, enter a strong password (it's the Basic Auth password for every API call).
+4. Click **Apply**. Render builds the root `Dockerfile` on the **Free** plan, then requests `/health` to verify the deploy — that first hit also boots the keep-alive pinger, so the idle timer never even starts.
+
+### Option B — manual (dashboard)
+
+1. Render dashboard → **New + → Web Service** → connect the repo.
+2. **Runtime: Docker** — auto-detected from the root `Dockerfile`; leave build and start commands empty.
+3. **Instance type: Free**.
+4. **Environment → Add environment variable**: `APP_PASSWORD` = a strong password.
+5. *(Optional but recommended)* **Settings → Health Check Path**: `/health` — every deploy then ends with a `/health` hit that (re)starts the pinger.
+6. **Deploy**. The first build takes a few minutes (the OCI SDK compiles); the app then goes live at `https://<service-name>.onrender.com`.
+
+### How it stays awake 24/7
+
+| Piece | What it does |
+|---|---|
+| 🔁 **Self-ping daemon** | On boot the app reads `RENDER_EXTERNAL_URL` (injected by Render automatically) and a background thread requests `https://<your-app>.onrender.com/health` every 10 minutes (`KEEP_ALIVE_INTERVAL=600`). |
+| ✅ **Why that works** | The self-request is genuine inbound traffic through Render's edge, so the 15-minute idle timer keeps resetting — the service, the provisioning loop and Telegram alerts never sleep. |
+| 🩺 **Health check** | `render.yaml` sets `healthCheckPath: /health`, so Render itself hits the app right after every deploy/restart and re-arms the pinger from second zero. |
+
+Keep-alive env vars (all optional — defaults are tuned for Render):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `KEEP_ALIVE` | `true` | Enable the self-ping daemon. Set `false` to disable. |
+| `KEEP_ALIVE_INTERVAL` | `600` | Seconds between self-pings (minimum 60). 600 s beats Render's 15-min idle window with margin. |
+| `KEEP_ALIVE_URL` | *(auto)* | Public URL to ping. Auto-detected from `RENDER_EXTERNAL_URL` on Render; set it explicitly on other hosts, e.g. `https://your-app.onrender.com` or your Railway URL. |
+
+### Recommended: add an external pinger (belt & suspenders)
+
+The built-in pinger *prevents* sleep, but it can't *wake* the service once it's already stopped (a stopped process can't ping). That can happen after a failed deploy, a Render incident, or a manual stop/restart. A free external monitor covers exactly that case — and gives you uptime alerts:
+
+- **cron-job.org** (free): *Create Cronjob* → URL `https://<your-app>.onrender.com/health` → schedule **Every 10 minutes** → Save.
+- **UptimeRobot** (free): *Add New Monitor* → type **HTTP(s)** → URL `https://<your-app>.onrender.com/health` → interval **5 minutes** → Create.
+
+With either one running, the service comes back within minutes even after a full stop.
+
+### Free-plan math
+
+The Render free plan includes **750 instance-hours per month**. Running 24/7 costs ≈ **730 hours** (31-day month), so one always-on service fits inside the free quota with ~20 h to spare.
+
+### Verify it's working
+
+```bash
+curl https://<your-app>.onrender.com/health
+# {"keep_alive":true,"keep_alive_interval":600,"keep_alive_url":"https://<your-app>.onrender.com","status":"ok","version":"5.0.2"}
+```
+
+- Render → **Logs** → filter for `keep-alive`: you should see `[keep-alive] ping OK` lines every 10 minutes.
+- Your external monitor (if added) should show ~100% uptime.
+- `curl https://<your-app>.onrender.com/api/version` → `{"version":"5.0.2"}`.
+
+## Quick deploy (elsewhere)
 
 ### Railway
 
@@ -93,7 +156,7 @@ All endpoints JSON. POST bodies take `user`, `tenancy`, `fingerprint`, `region`,
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/health` | Liveness + version + keep-alive flag (no auth); first hit starts keep-alive pinger |
+| GET | `/health` | Liveness + version + keep-alive status (no auth); each hit re-arms the keep-alive pinger |
 | GET | `/api/version` | App version (no auth) |
 | GET | `/api/status` | Automation loop status |
 | GET | `/api/logs?offset=N` | Incremental log fetch |
@@ -114,8 +177,19 @@ All endpoints JSON. POST bodies take `user`, `tenancy`, `fingerprint`, `region`,
 |---|---|
 | `Out of host capacity` forever | Normal for A1 in popular regions — leave the loop running; it grabs capacity the second it frees. Try all ADs. |
 | Auth fails right after deploy | `APP_PASSWORD` not picked up — check platform env vars, redeploy. |
-| Service sleeps anyway | Ensure `KEEP_ALIVE=true` and (non-Render) `KEEP_ALIVE_URL` points at the public URL. Check logs for `Keep-alive ping OK`. |
+| Service sleeps anyway | Check Render **Logs** for `[keep-alive] ping OK` every 10 min. Ensure `KEEP_ALIVE=true` and — on non-Render hosts — `KEEP_ALIVE_URL` points at the public URL. If the service was fully stopped (failed deploy, manual stop), only an external pinger (cron-job.org / UptimeRobot) can wake it — see [Deploy on Render](#deploy-on-render-free-247). |
 | Image dropdown empty | Your region may lack Ubuntu images for that shape — enable *all OS* mode or pick another shape. |
+
+## Changelog v5.0.1 → v5.0.2
+
+**Keep-alive — actually implemented**
+- v5.0.1 documented a self-ping daemon (`KEEP_ALIVE` was even set in the Dockerfile) but `app.py` contained no such code. It exists now: a background thread pings `/health` on the public URL every 10 min, auto-detects `RENDER_EXTERNAL_URL`, honors `KEEP_ALIVE` / `KEEP_ALIVE_INTERVAL` / `KEEP_ALIVE_URL`, and is idempotently (re)armed by every `/health` hit. Keep-alive logging goes to stdout (`[keep-alive] ...`) so it shows in platform logs without spamming Telegram live logs.
+- `/health` now reports `status`, `version`, `keep_alive`, `keep_alive_url`, `keep_alive_interval` (previously just `{"status":"ok"}`).
+- New `GET /api/version` endpoint (was documented since v5.0, now real).
+
+**Render deploy**
+- New `render.yaml` Blueprint: Docker runtime, free plan, `/health` health check, `APP_PASSWORD` prompt, keep-alive defaults — enables the one-click **Deploy to Render** button.
+- README: full [Deploy on Render (free, 24/7)](#deploy-on-render-free-247) guide — one-click + manual flow, how the self-ping beats the 15-min idle spin-down, external-pinger backup (cron-job.org / UptimeRobot), free-hours math (750 h/month vs ≈730 h for 24/7).
 
 ## Changelog v5.0 → v5.0.1
 
