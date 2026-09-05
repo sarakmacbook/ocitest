@@ -703,6 +703,8 @@ def check_free_tier_limits(config, account_config, compute_client, block_client,
     requested_boot_gb = int(account_config.get('boot_volume_gb', 50))
     if requested_boot_gb < 50:
         requested_boot_gb = 50
+    if requested_boot_gb > 200:
+        requested_boot_gb = 200
     ads = identity_client.list_availability_domains(compartment_id=tenancy).data
     total_storage = 0
     for ad in ads:
@@ -947,6 +949,9 @@ def run_automated_creation(config, account_config, compute_client, network_clien
         if boot_gb < 50:
             add_log("Boot volume raised to minimum 50 GB.")
             boot_gb = 50
+        if boot_gb > 200:
+            add_log("Boot volume capped at free-tier maximum 200 GB.")
+            boot_gb = 200
         add_log(f"Setup Verified -> Subnet: {subnet_id[:20]}... | Image: {image_id[:20]}... | Zone: {ad_list[0] if ad_list else 'N/A'}")
         add_log(f"Debug -> Shape: {account_config['shape']} | Boot: {boot_gb}GB | OCPUs: {account_config.get('ocpus', 'N/A')} | RAM: {account_config.get('memory', 'N/A')}GB")
         add_log(f"Debug -> Subnet details: assign_public_ip=True")
