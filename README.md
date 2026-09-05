@@ -32,8 +32,8 @@ Formerly "OCI Provisioner". Same codebase, sharper aim: it sits scoped on your t
 
 ### Railway
 
-1. Connect repo → Railway auto-detects `railway.toml` / `nixpacks.toml`
-2. Add env var `APP_PASSWORD`, deploy.
+1. Connect repo → Railway builds the included root `Dockerfile` (a root `Dockerfile` always takes priority over Nixpacks/Railpack — keep only one deploy path in the repo)
+2. Add env var `APP_PASSWORD`, deploy. `railway.toml` sets the `/health` healthcheck and gunicorn binds to `$PORT` automatically.
 
 ### Heroku
 
