@@ -1,0 +1,17 @@
+# Render Blueprint — deploy OCI Sniper as a free 24/7 web service.
+# Docs: https://render.com/docs/blueprint-spec
+# After the first deploy you can change the plan or add env vars in the dashboard.
+services:
+  - type: web
+    name: oci-sniper
+    runtime: docker          # builds the root Dockerfile (gunicorn binds $PORT)
+    plan: free               # 750 instance-hours/month; ~730 h needed for 24/7
+    healthCheckPath: /health # confirms deploy AND starts the keep-alive pinger
+    autoDeploy: true         # redeploy on every push to the default branch
+    envVars:
+      - key: APP_PASSWORD    # Basic Auth password for all API endpoints — required
+        sync: false          # Render prompts you to fill this in at deploy time
+      - key: KEEP_ALIVE      # self-ping so the free instance never sleeps
+        value: "true"
+      - key: KEEP_ALIVE_INTERVAL
+        value: "600"         # ping /health every 10 min (< Render's 15-min idle window)
