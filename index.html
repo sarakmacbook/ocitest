@@ -889,7 +889,10 @@
                     html += '<div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px;">';
                     html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">';
                     html += '<span style="font-size:13px;font-weight:600;color:var(--text);">Instances (' + u.all_instances.length + ')</span>';
+                    html += '<div style="display:flex;gap:6px;">';
+                    html += '<button onclick="startAllInstances()" style="padding:4px 10px;border:1px solid var(--positive);border-radius:4px;background:rgba(34,197,94,0.1);color:var(--positive);font-size:11px;font-weight:600;cursor:pointer;">&#9654; START ALL</button>';
                     html += '<button onclick="deleteAllInstances()" style="padding:4px 10px;border:1px solid var(--danger);border-radius:4px;background:rgba(239,68,68,0.1);color:var(--danger);font-size:11px;font-weight:600;cursor:pointer;">&#128293; DELETE ALL</button>';
+                    html += '</div>';
                     html += '</div>';
                     u.all_instances.forEach(inst => {
                         const shapeInfo = inst.ocpus ? ' (' + inst.ocpus + ' OCPU, ' + inst.memory + ' GB)' : '';
@@ -900,6 +903,9 @@
                         html += '<div class="instance-name">' + inst.name + '</div>';
                         html += '<div class="instance-meta">' + ipLine + inst.shape + shapeInfo + ' | <span style="color:' + stateColor + '">' + inst.state + '</span></div>';
                         html += '</div>';
+                        if (inst.state === 'STOPPED') {
+                            html += '<button class="instance-delete" onclick="startInstance(' + "'" + inst.id + "'" + ',' + "'" + inst.name + "'" + ')" title="Start this instance" style="border-color:rgba(34,197,94,0.3);color:var(--positive);margin-right:4px;">&#9654;</button>';
+                        }
                         html += '<button class="instance-delete" onclick="rebootInstance(' + "'" + inst.id + "'" + ',' + "'" + inst.name + "'" + ')" title="Reboot this instance" style="border-color:rgba(245,158,11,0.3);color:var(--warning);margin-right:4px;">&#8635;</button>';
                         html += '<button class="instance-delete" onclick="deleteInstance(' + "'" + inst.id + "'" + ',' + "'" + inst.name + "'" + ')" title="Delete this instance">&#128465;</button>';
                         html += '</div>';
@@ -1353,6 +1359,71 @@
             }
         } catch (err) {
             addLog('Delete error: ' + err.message, 'error');
+        }
+    }
+
+    async function startAllInstances() {
+        parseConfig();
+        const user = document.getElementById('cfgUser').value;
+        const key = document.getElementById('cfgKey').value;
+        if (!user || !key) { addLog('Error: Credentials required first', 'error'); return; }
+        if (!confirm('Start ALL stopped instances in this tenancy?')) {
+            addLog('Start all cancelled', 'warn'); return;
+        }
+        addLog('Starting all stopped instances...', 'info');
+        try {
+            const res = await fetch('/api/start-instances', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: user, tenancy: document.getElementById('cfgTenancy').value,
+                    fingerprint: document.getElementById('cfgFingerprint').value,
+                    region: document.getElementById('cfgRegion').value,
+                    private_key: key, timezone: userTimezone
+                })
+            });
+            const data = await res.json();
+            if (data.success) {
+                addLog('Started ' + data.started + ' instance(s)', 'success');
+                if (data.failed && data.failed.length > 0) {
+                    data.failed.forEach(f => addLog('Failed: ' + f.name + ' - ' + f.error, 'error'));
+                }
+                setTimeout(checkQuota, 3000);
+            } else {
+                addLog('Start all failed: ' + data.error, 'error');
+            }
+        } catch (err) {
+            addLog('Start all error: ' + err.message, 'error');
+        }
+    }
+
+    async function startInstance(instanceId, instanceName) {
+        parseConfig();
+        const user = document.getElementById('cfgUser').value;
+        const key = document.getElementById('cfgKey').value;
+        if (!user || !key) { addLog('Error: Credentials required first', 'error'); return; }
+        if (!confirm('Start instance "' + instanceName + '"?')) {
+            addLog('Start cancelled', 'warn'); return;
+        }
+        addLog('Starting instance "' + instanceName + '"...', 'info');
+        try {
+            const res = await fetch('/api/start-instances', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: user, tenancy: document.getElementById('cfgTenancy').value,
+                    fingerprint: document.getElementById('cfgFingerprint').value,
+                    region: document.getElementById('cfgRegion').value,
+                    private_key: key, instance_id: instanceId, timezone: userTimezone
+                })
+            });
+            const data = await res.json();
+            if (data.success) {
+                addLog('Started: ' + data.message, 'success');
+                setTimeout(checkQuota, 3000);
+            } else {
+                addLog('Start failed: ' + data.error, 'error');
+            }
+        } catch (err) {
+            addLog('Start error: ' + err.message, 'error');
         }
     }
 

@@ -1394,6 +1394,48 @@ def api_reboot_instance():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
+@app.route('/api/start-instances', methods=['POST'])
+@require_auth
+def api_start_instances():
+    """Start STOPPED instances. If instance_id is provided, start only that instance; otherwise start all stopped."""
+    data = request.json or {}
+    set_user_tz(data.get('timezone'))
+    config = build_config(data)
+    instance_id = data.get('instance_id')
+    try:
+        oci.config.validate_config(config)
+        compute_client = oci.core.ComputeClient(config)
+
+        if instance_id:
+            # Start a single instance
+            try:
+                inst = compute_client.get_instance(instance_id=instance_id).data
+                name = inst.display_name
+            except:
+                name = instance_id[:20]
+            compute_client.instance_action(instance_id=instance_id, action='START')
+            add_log(f"Starting '{name}' ({instance_id[:20]}...)")
+            return jsonify({'success': True, 'message': f"Instance '{name}' start initiated", 'started': 1})
+
+        # Start all stopped instances
+        identity_client = oci.identity.IdentityClient(config)
+        instances = list_all_instances(config, compute_client, identity_client)
+        stopped = [inst for inst in instances if inst['state'] == 'STOPPED']
+        if not stopped:
+            return jsonify({'success': True, 'message': 'No stopped instances found', 'started': 0})
+        started = 0
+        failed = []
+        for inst in stopped:
+            try:
+                compute_client.instance_action(instance_id=inst['id'], action='START')
+                add_log(f"Starting '{inst['name']}' ({inst['id'][:20]}...)")
+                started += 1
+            except Exception as e:
+                failed.append({'name': inst['name'], 'error': str(e)})
+        return jsonify({'success': True, 'message': f"Initiated start for {started} instance(s)", 'started': started, 'failed': failed})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
 @app.route('/api/delete-all-instances', methods=['POST'])
 @require_auth
 def api_delete_all_instances():
