@@ -560,7 +560,7 @@
                     <div class="grid-2">
                         <div class="form-group" style="margin-bottom:0;">
                             <label style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:block;">Target boot volume</label>
-                            <select id="bootVolumeSelect" class="form-select" style="font-size:12px;">
+                            <select id="bootVolumeSelect" class="form-select" style="font-size:12px;" onchange="onBootVolumeSelectChange()">
                                 <option value="">-- Select detached volume --</option>
                             </select>
                         </div>
@@ -571,6 +571,28 @@
                     </div>
                     <button class="btn btn-primary" onclick="launchFromBootVolume()" style="width:100%;margin-top:10px;padding:10px;">Launch instance from selected volume</button>
                     <div id="bootVolLaunchResult" style="margin-top:8px;font-size:11px;display:none;"></div>
+                </div>
+                <div class="form-group" style="background:var(--surface-raised);padding:12px;border-radius:var(--radius-md);border:1px solid var(--border);margin-top:12px;">
+                    <label class="form-label" style="color:var(--text-secondary);">Re-attach boot volume to instance</label>
+                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
+                        Attach the selected detached volume to an existing instance in the <b>same availability domain</b>. The instance is stopped if it is running, then the volume is attached. Optionally start it afterwards.
+                    </div>
+                    <div class="grid-2">
+                        <div class="form-group" style="margin-bottom:0;">
+                            <label style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:block;">Target instance</label>
+                            <select id="bootAttachInstanceSelect" class="form-select" style="font-size:12px;">
+                                <option value="">-- Scan volumes first --</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="margin-bottom:0;display:flex;align-items:flex-end;">
+                            <label class="checkbox-row" style="margin-bottom:8px;">
+                                <input type="checkbox" id="bootAttachStartAfter" checked>
+                                <span>Start instance after attach</span>
+                            </label>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" id="bootAttachBtn" onclick="attachBootVolume()" style="width:100%;margin-top:10px;padding:10px;">Attach volume to selected instance</button>
+                    <div id="bootVolAttachResult" style="margin-top:8px;font-size:11px;display:none;"></div>
                 </div>
                 <div style="margin-top:10px;padding:10px;background:rgba(245,158,11,0.05);border:1px solid rgba(245,158,11,0.2);border-radius:var(--radius-md);">
                     <div style="font-size:12px;color:var(--warning);font-weight:500;">&#9432; Resize tip</div>
@@ -1645,10 +1667,57 @@
         document.getElementById('bootVolInstanceName').value = 'Resized-Instance';
         document.getElementById('bootVolumeList').innerHTML = '<div style="font-size:12px;color:var(--text-muted);">Click scan to load boot volumes.</div>';
         document.getElementById('bootVolLaunchResult').style.display = 'none';
+        const attachSelect = document.getElementById('bootAttachInstanceSelect');
+        if (attachSelect) attachSelect.innerHTML = '<option value="">-- Scan volumes first --</option>';
+        const attachResult = document.getElementById('bootVolAttachResult');
+        if (attachResult) attachResult.style.display = 'none';
+        lastBootScan = { volumes: [], instances: [] };
         clearLogs();
         addLog('All fields cleared', 'success');
     }
 
+
+    let lastBootScan = { volumes: [], instances: [] };
+
+    function onBootVolumeSelectChange() {
+        refreshAttachInstanceSelect();
+    }
+
+    function refreshAttachInstanceSelect() {
+        const select = document.getElementById('bootAttachInstanceSelect');
+        if (!select) return;
+        const volId = document.getElementById('bootVolumeSelect').value;
+        const vol = (lastBootScan.volumes || []).find(v => v.id === volId);
+        let candidates = (lastBootScan.instances || []).filter(i => !i.has_boot_volume);
+        if (vol && vol.ad) {
+            candidates = candidates.filter(i => i.availability_domain === vol.ad);
+        }
+        if (!candidates.length) {
+            select.innerHTML = volId
+                ? '<option value="">-- No compatible instance in this AD --</option>'
+                : '<option value="">-- Select a detached volume first --</option>';
+            return;
+        }
+        select.innerHTML = '<option value="">-- Select instance --</option>';
+        candidates.forEach(i => {
+            const opt = document.createElement('option');
+            opt.value = i.id;
+            opt.textContent = i.name + ' (' + i.state + ', ' + (i.availability_domain || 'N/A') + ')';
+            select.appendChild(opt);
+        });
+        if (candidates.length === 1) select.value = candidates[0].id;
+    }
+
+    function selectBootVolumeForAttach(volId, volName) {
+        document.getElementById('bootVolumeSelect').value = volId;
+        refreshAttachInstanceSelect();
+        addLog('Selected boot volume for attach: ' + volName, 'info');
+        const result = document.getElementById('bootVolAttachResult');
+        if (result) {
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--accent)">Volume selected. Pick a target instance and click attach.</span>';
+        }
+    }
 
     async function scanBootVolumes() {
         parseConfig();
@@ -1671,6 +1740,7 @@
                 })
             });
             const data = await res.json();
+            lastBootScan = { volumes: data.volumes || [], instances: data.instances || [] };
             if (data.success && data.volumes.length > 0) {
                 let html = '';
                 select.innerHTML = '<option value="">-- Select detached volume --</option>';
@@ -1690,7 +1760,8 @@
                     }
                     html += `<button class="instance-delete" onclick="deleteBootVolume('${vol.id}','${vol.name}')" title="Delete this boot volume">Delete</button>`;
                     if (!vol.instance_id) {
-                        html += `<button class="instance-delete" onclick="document.getElementById('bootVolumeSelect').value='${vol.id}';addLog('Selected boot volume: ${vol.name}','info');" style="border-color:rgba(99,102,241,0.3);color:var(--accent);" title="Select for launch">Select</button>`;
+                        html += `<button class="instance-delete" onclick="selectBootVolumeForAttach('${vol.id}','${vol.name}')" style="border-color:rgba(34,197,94,0.3);color:var(--positive);" title="Select to re-attach to an instance">Attach</button>`;
+                        html += `<button class="instance-delete" onclick="document.getElementById('bootVolumeSelect').value='${vol.id}';onBootVolumeSelectChange();addLog('Selected boot volume: ${vol.name}','info');" style="border-color:rgba(99,102,241,0.3);color:var(--accent);" title="Select for launch">Select</button>`;
                         const opt = document.createElement('option');
                         opt.value = vol.id;
                         opt.textContent = `${vol.name} (${vol.size_gb} GB, ${vol.ad})`;
@@ -1699,10 +1770,12 @@
                     html += `</div></div>`;
                 });
                 list.innerHTML = html;
+                refreshAttachInstanceSelect();
                 addLog(`Found ${data.volumes.length} boot volume(s)`, 'success');
             } else if (data.success) {
                 list.innerHTML = '<div style="color:var(--text-muted);">No boot volumes found.</div>';
                 select.innerHTML = '<option value="">-- No detached volumes --</option>';
+                refreshAttachInstanceSelect();
                 addLog('No boot volumes found', 'warn');
             } else {
                 list.innerHTML = `<div style="color:var(--danger);">Error: ${data.error}</div>`;
@@ -1776,6 +1849,72 @@
         } catch (err) {
             addLog('Delete error: ' + err.message, 'error');
         }
+    }
+
+    async function attachBootVolume() {
+        parseConfig();
+        const bootVolumeId = document.getElementById('bootVolumeSelect').value;
+        const instanceSelect = document.getElementById('bootAttachInstanceSelect');
+        const instanceId = instanceSelect.value;
+        const startAfter = document.getElementById('bootAttachStartAfter').checked;
+        const user = document.getElementById('cfgUser').value;
+        const key = document.getElementById('cfgKey').value;
+        const result = document.getElementById('bootVolAttachResult');
+        const btn = document.getElementById('bootAttachBtn');
+
+        if (!user || !key) { addLog('Error: Credentials required', 'error'); return; }
+        if (!bootVolumeId) {
+            addLog('Error: Select a detached boot volume', 'error');
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--warning)">Select a detached boot volume first</span>';
+            return;
+        }
+        if (!instanceId) {
+            addLog('Error: Select a target instance', 'error');
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--warning)">Select a target instance in the same AD</span>';
+            return;
+        }
+
+        const instLabel = instanceSelect.options[instanceSelect.selectedIndex]
+            ? instanceSelect.options[instanceSelect.selectedIndex].textContent
+            : instanceId;
+        if (!confirm('Attach selected boot volume to instance "' + instLabel + '"?\n\nThe instance will be stopped if it is running.' + (startAfter ? '\nIt will be started after attach.' : ''))) {
+            addLog('Attach cancelled', 'warn'); return;
+        }
+
+        result.style.display = 'none';
+        btn.disabled = true; btn.textContent = 'Attaching...';
+        addLog('Attaching boot volume to instance "' + instLabel + '"...', 'info');
+        try {
+            const res = await fetch('/api/attach-boot-volume', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: user, tenancy: document.getElementById('cfgTenancy').value,
+                    fingerprint: document.getElementById('cfgFingerprint').value,
+                    region: document.getElementById('cfgRegion').value,
+                    private_key: key, boot_volume_id: bootVolumeId,
+                    instance_id: instanceId, start_after: startAfter,
+                    timezone: userTimezone
+                })
+            });
+            const data = await res.json();
+            result.style.display = 'block';
+            if (data.success) {
+                result.innerHTML = '<span style="color:var(--positive)">' + data.message + '</span>';
+                addLog('Attached: ' + data.message, 'success');
+                setTimeout(scanBootVolumes, 3000);
+                setTimeout(checkQuota, 4000);
+            } else {
+                result.innerHTML = '<span style="color:var(--danger)">Failed: ' + data.error + '</span>';
+                addLog('Attach failed: ' + data.error, 'error');
+            }
+        } catch (err) {
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--danger)">Error: ' + err.message + '</span>';
+            addLog('Attach error: ' + err.message, 'error');
+        }
+        btn.disabled = false; btn.textContent = 'Attach volume to selected instance';
     }
 
     async function launchFromBootVolume() {

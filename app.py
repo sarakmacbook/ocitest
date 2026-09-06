@@ -51,7 +51,7 @@ if not ADMIN_PASSWORD:
 # Max provisioning-loop attempts before giving up. 0 (default) == unlimited.
 MAX_ATTEMPTS = int(os.environ.get('MAX_ATTEMPTS', 0))
 
-APP_VERSION = "5.0.2"
+APP_VERSION = "5.0.3"
 
 # ---- Keep-alive: self-ping so free-tier hosts (Render etc.) never sleep ----
 def _env_bool(name, default):
@@ -1508,6 +1508,9 @@ def list_boot_volumes():
             except Exception:
                 pass
         attachment_map = {a.boot_volume_id: a for a in attachments if a.lifecycle_state == 'ATTACHED'}
+        attached_instance_ids = {
+            a.instance_id for a in attachments if a.lifecycle_state in ('ATTACHED', 'ATTACHING')
+        }
 
         all_volumes = []
         for ad in ads:
@@ -1533,7 +1536,161 @@ def list_boot_volumes():
                     })
             except Exception:
                 pass
-        return jsonify({'success': True, 'volumes': all_volumes})
+
+        instances_out = []
+        for inst in instances:
+            if inst.lifecycle_state in ('TERMINATED', 'TERMINATING'):
+                continue
+            instances_out.append({
+                'id': inst.id,
+                'name': inst.display_name or 'Unnamed',
+                'state': inst.lifecycle_state,
+                'availability_domain': inst.availability_domain,
+                'shape': inst.shape,
+                'has_boot_volume': inst.id in attached_instance_ids
+            })
+        return jsonify({'success': True, 'volumes': all_volumes, 'instances': instances_out})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+def _wait_instance_state(compute_client, instance_id, target_state, attempts=45, delay=2):
+    inst = None
+    for _ in range(attempts):
+        inst = compute_client.get_instance(instance_id=instance_id).data
+        if inst.lifecycle_state == target_state:
+            return inst
+        if inst.lifecycle_state in ('TERMINATED', 'TERMINATING'):
+            return inst
+        time.sleep(delay)
+    return inst
+
+
+@app.route('/api/attach-boot-volume', methods=['POST'])
+@require_auth
+def attach_boot_volume():
+    """Attach a detached boot volume to an existing instance (same AD). Instance is stopped if running."""
+    data = request.json or {}
+    set_user_tz(data.get('timezone'))
+    config = build_config(data)
+    boot_volume_id = data.get('boot_volume_id')
+    instance_id = data.get('instance_id')
+    start_after = bool(data.get('start_after', False))
+    if not boot_volume_id:
+        return jsonify({'success': False, 'error': 'boot_volume_id required'})
+    if not instance_id:
+        return jsonify({'success': False, 'error': 'instance_id required'})
+    try:
+        oci.config.validate_config(config)
+        compute_client = oci.core.ComputeClient(config)
+        block_client = oci.core.BlockstorageClient(config)
+        tenancy = config['tenancy']
+
+        vol = block_client.get_boot_volume(boot_volume_id=boot_volume_id).data
+        inst = compute_client.get_instance(instance_id=instance_id).data
+        vol_name = vol.display_name or boot_volume_id[:20]
+        inst_name = inst.display_name or instance_id[:20]
+
+        if inst.lifecycle_state in ('TERMINATED', 'TERMINATING'):
+            return jsonify({'success': False, 'error': f"Instance '{inst_name}' is terminated"})
+
+        vol_ad = vol.availability_domain
+        inst_ad = inst.availability_domain
+        if vol_ad and inst_ad and vol_ad != inst_ad:
+            return jsonify({
+                'success': False,
+                'error': f"Boot volume AD ({vol_ad}) does not match instance AD ({inst_ad})"
+            })
+
+        for _ in range(30):
+            vol = block_client.get_boot_volume(boot_volume_id=boot_volume_id).data
+            if getattr(vol, 'lifecycle_state', '') == 'AVAILABLE':
+                break
+            if getattr(vol, 'lifecycle_state', '') in ('TERMINATED', 'FAULTY'):
+                return jsonify({'success': False, 'error': f"Boot volume is {vol.lifecycle_state}"})
+            time.sleep(2)
+        if getattr(vol, 'lifecycle_state', '') != 'AVAILABLE':
+            return jsonify({
+                'success': False,
+                'error': f"Boot volume not AVAILABLE (state: {getattr(vol, 'lifecycle_state', 'UNKNOWN')})"
+            })
+
+        existing = compute_client.list_boot_volume_attachments(
+            availability_domain=inst.availability_domain,
+            compartment_id=tenancy,
+            instance_id=instance_id
+        ).data
+        active = [a for a in existing if a.lifecycle_state in ('ATTACHED', 'ATTACHING')]
+        if active:
+            already = next((a for a in active if a.boot_volume_id == boot_volume_id), None)
+            if already:
+                return jsonify({
+                    'success': True,
+                    'already_attached': True,
+                    'attachment_id': already.id,
+                    'started': False,
+                    'message': f"Boot volume already attached to '{inst_name}'"
+                })
+            return jsonify({'success': False, 'error': f"Instance '{inst_name}' already has a boot volume attached"})
+
+        if inst.lifecycle_state == 'RUNNING':
+            add_log(f"Stopping instance '{inst_name}' to attach boot volume...")
+            compute_client.instance_action(instance_id=instance_id, action='STOP')
+            inst = _wait_instance_state(compute_client, instance_id, 'STOPPED')
+        elif inst.lifecycle_state == 'STOPPING':
+            add_log(f"Waiting for instance '{inst_name}' to stop before attach...")
+            inst = _wait_instance_state(compute_client, instance_id, 'STOPPED')
+
+        if inst.lifecycle_state != 'STOPPED':
+            return jsonify({
+                'success': False,
+                'error': f"Instance must be STOPPED to attach a boot volume (state: {inst.lifecycle_state})"
+            })
+
+        add_log(f"Attaching boot volume '{vol_name}' to instance '{inst_name}'...")
+        att = compute_client.attach_boot_volume(
+            attach_boot_volume_details=oci.core.models.AttachBootVolumeDetails(
+                boot_volume_id=boot_volume_id,
+                instance_id=instance_id,
+                display_name=(vol.display_name or 'boot')[:100] + '-attachment'
+            )
+        ).data
+
+        attached = False
+        for _ in range(30):
+            cur = compute_client.get_boot_volume_attachment(boot_volume_attachment_id=att.id).data
+            if cur.lifecycle_state == 'ATTACHED':
+                attached = True
+                break
+            if cur.lifecycle_state in ('DETACHED',):
+                return jsonify({'success': False, 'error': 'Boot volume attachment ended in DETACHED'})
+            time.sleep(2)
+
+        if not attached:
+            add_log(f"Boot volume attach initiated on '{inst_name}' (still attaching)")
+            return jsonify({
+                'success': True,
+                'attachment_id': att.id,
+                'started': False,
+                'message': f"Attach initiated for '{inst_name}' (still attaching)"
+            })
+
+        add_log(f"Boot volume '{vol_name}' attached to '{inst_name}'")
+        started = False
+        if start_after:
+            compute_client.instance_action(instance_id=instance_id, action='START')
+            add_log(f"Starting instance '{inst_name}' after boot volume attach...")
+            started = True
+
+        msg = f"Boot volume attached to '{inst_name}'"
+        if started:
+            msg += ' and start initiated'
+        return jsonify({
+            'success': True,
+            'attachment_id': att.id,
+            'started': started,
+            'message': msg
+        })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
