@@ -1,4 +1,4 @@
-# 🎯 OCI Sniper v5.0.2
+# 🎯 OCI Sniper v5.0.3
 
 Always-Free instance grabber & manager for Oracle Cloud Infrastructure (OCI).
 
@@ -20,6 +20,7 @@ Formerly "OCI Provisioner". Same codebase, sharper aim: it sits scoped on your t
 
 - 🔁 **Auto-launch loop** — retries on `out of host capacity`, rotates availability domains, optional randomized delay; Telegram-pings you the moment an instance is provisioned
 - 🖥️ **Full instance management** — list / reboot / delete single or DELETE ALL (type-to-confirm)
+- 💾 **Boot volume management** — list / detach / re-attach to an existing instance / delete / launch a new instance from a detached volume
 - 🌐 **Network bootstrap** — one click creates VCN + Internet Gateway + route + subnet if missing
 - 🔓 **Firewall helper** — open ports via NSG or Security List with input validation (CIDR + port range)
 - 📊 **Quota panel** — live Always Free usage: 2 A1 OCPUs / 12 GB RAM / 2 Micro / 200 GB boot volume
@@ -84,12 +85,12 @@ The Render free plan includes **750 instance-hours per month**. Running 24/7 cos
 
 ```bash
 curl https://<your-app>.onrender.com/health
-# {"keep_alive":true,"keep_alive_interval":600,"keep_alive_url":"https://<your-app>.onrender.com","status":"ok","version":"5.0.2"}
+# {"keep_alive":true,"keep_alive_interval":600,"keep_alive_url":"https://<your-app>.onrender.com","status":"ok","version":"5.0.3"}
 ```
 
 - Render → **Logs** → filter for `keep-alive`: you should see `[keep-alive] ping OK` lines every 10 minutes.
 - Your external monitor (if added) should show ~100% uptime.
-- `curl https://<your-app>.onrender.com/api/version` → `{"version":"5.0.2"}`.
+- `curl https://<your-app>.onrender.com/api/version` → `{"version":"5.0.3"}`.
 
 ## Quick deploy (elsewhere)
 
@@ -138,6 +139,7 @@ APP_PASSWORD=changeme python app.py
 3. Pick shape (A1.Flex OCPU/memory or Micro), boot volume (50–200 GB), SSH public key → **Start provisioning loop**.
 4. Watch the live terminal; get Telegram ping on success. Loop stops via **Stop** or `MAX_ATTEMPTS`.
 5. Manage instances from the quota panel: reboot / delete single, or DELETE ALL (type-to-confirm).
+6. **Boot volumes:** *Scan volumes* → Detach from a stopped instance, **re-attach** a detached volume to an existing instance in the same AD (optional start after attach), delete, or launch a new instance from a detached volume.
 
 > **Tip:** for A1.Flex, request the full 4 OCPU / 24 GB — if that's taken, drop to 2/12 and let the loop grab it. Both configs fit the free tier.
 
@@ -170,6 +172,10 @@ All endpoints JSON. POST bodies take `user`, `tenancy`, `fingerprint`, `region`,
 | POST | `/api/scan-security-rules` | Dump effective rules for a subnet |
 | POST | `/api/test-telegram` · `send-telegram` | Telegram bot check / manual message |
 | POST | `/api/list-instances` · `delete-instance` · `reboot-instance` · `delete-all-instances` | Instance management |
+| POST | `/api/list-boot-volumes` | List boot volumes + instances (with `has_boot_volume`) |
+| POST | `/api/detach-boot-volume` | Stop instance if running, then detach boot volume |
+| POST | `/api/attach-boot-volume` | Re-attach a detached boot volume to an existing instance (same AD); optional `start_after` |
+| POST | `/api/delete-boot-volume` · `launch-from-boot-volume` | Delete volume / launch a new instance from a detached volume |
 
 ## Troubleshooting
 
@@ -179,6 +185,13 @@ All endpoints JSON. POST bodies take `user`, `tenancy`, `fingerprint`, `region`,
 | Auth fails right after deploy | `APP_PASSWORD` not picked up — check platform env vars, redeploy. |
 | Service sleeps anyway | Check Render **Logs** for `[keep-alive] ping OK` every 10 min. Ensure `KEEP_ALIVE=true` and — on non-Render hosts — `KEEP_ALIVE_URL` points at the public URL. If the service was fully stopped (failed deploy, manual stop), only an external pinger (cron-job.org / UptimeRobot) can wake it — see [Deploy on Render](#deploy-on-render-free-247). |
 | Image dropdown empty | Your region may lack Ubuntu images for that shape — enable *all OS* mode or pick another shape. |
+
+## Changelog v5.0.2 → v5.0.3
+
+**Boot volume re-attach**
+- New `POST /api/attach-boot-volume` attaches a detached boot volume to an existing instance in the same availability domain. Stops the instance if it is running, waits until the volume is AVAILABLE, refuses if the instance already has a boot volume, then optionally starts the instance (`start_after`).
+- `/api/list-boot-volumes` now also returns `instances` with `has_boot_volume` so the UI can offer compatible targets.
+- Boot Volume Management panel: **Re-attach boot volume to instance** — pick a detached volume + target instance, optional start-after-attach. Detached volume rows get an **Attach** button.
 
 ## Changelog v5.0.1 → v5.0.2
 
