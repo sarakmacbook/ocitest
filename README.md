@@ -119,6 +119,27 @@ APP_PASSWORD=changeme python app.py
 # http://localhost:5000
 ```
 
+## Uninstall
+
+`uninstall.sh` removes the app from the machine and/or cleans up the OCI resources it created. Dry-run is safe — nothing is deleted without your confirmation.
+
+```bash
+./uninstall.sh                        # interactive: choose app and/or OCI cleanup
+./uninstall.sh --app-only             # stop app, remove .venv/caches (keeps source) — add --purge-dir to delete the repo too
+./uninstall.sh --oci-only --dry-run   # preview which OCI resources match (instances, boot volumes)
+./uninstall.sh --oci-only --yes       # terminate app instances + delete their boot volumes
+./uninstall.sh --all --vcn            # remove app AND its bootstrap VCN/subnet/IGW
+```
+
+**What it removes**
+
+| Scope | Behavior |
+|---|---|
+| App (local) | Stops the process on `--port` (default 5000), removes `.venv`/`venv`, `__pycache__`, `*.pyc`. Optional `--cron` (crontab lines referencing this repo), `--docker` (matching `oci-sniper`/`oci-provisioner` containers/images), `--purge-dir` (delete the repo dir). |
+| OCI resources | Uses your `~/.oci/config` (OCI CLI + `jq` required). Terminates instances and deletes boot volumes whose name matches the app's patterns — default `AlwaysFree-Bot`, `Resized-Instance`, or an IP (`10.0.0.5`). `--keep-boot-volumes` preserves volumes; `--vcn` also deletes the `provisioner-vcn`/subnet/IGW created by *Create subnet* (refuses automatically if the VCN holds other subnets unless `--force-vcn`); `--name-pattern` overrides the match. |
+
+> ⚠️ Instances/boot volumes renamed by you or not matching these patterns are **never** touched. `--preserve-boot-volume` is used appropriately: volumes are deleted only when they match and you didn't pass `--keep-boot-volumes`.
+
 ## Environment variables
 
 | Variable | Default | Purpose |
