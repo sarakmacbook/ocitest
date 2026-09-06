@@ -829,6 +829,74 @@ def get_instance_public_ip(config, compute_client, network_client, instance_id):
         return None, str(e)
 
 
+# IPv4 (with optional IPv6). OCI display_name permits letters, digits, hyphen,
+# period, underscore, max 255 chars. A bare dotted-quad is already valid; we
+# still whitelist the chars defensively so a stray newline / unicode can't break
+# the UpdateInstance call.
+_IPV4_RE = re.compile(r'^(?:\d{1,3}\.){3}\d{1,3}$')
+_IPV6_RE = re.compile(r'^[0-9A-Fa-f:]+$')
+
+def _sanitize_display_name(name):
+    if not name:
+        return None
+    name = name.strip().replace(' ', '_')
+    # Keep only characters OCI accepts in a display_name.
+    name = re.sub(r'[^A-Za-z0-9._-]', '-', name)
+    # Collapse runs of dashes created by sanitization.
+    name = re.sub(r'-+', '-', name).strip('-')
+    if not name:
+        return None
+    if len(name) > 255:
+        name = name[:255]
+    return name
+
+def rename_instance_to_ip(compute_client, instance_id, public_ip):
+    """Best-effort: rename an instance's display_name to its public IP.
+
+    Returns the new name on success, or None on failure (any error is logged
+    but not raised — the instance is already running, so a failed rename must
+    not abort the rest of the flow).
+    """
+    if not public_ip:
+        return None
+    if not (_IPV4_RE.match(public_ip) or _IPV6_RE.match(public_ip)):
+        add_log(f"Rename skipped: '{public_ip}' is not a valid IP literal")
+        return None
+    new_name = _sanitize_display_name(public_ip)
+    if not new_name:
+        return None
+    # OCI rejects renaming to the same name, so skip the API call if it's
+    # already the current display_name (e.g. retry of the same loop).
+    try:
+        current = compute_client.get_instance(instance_id=instance_id).data
+        if getattr(current, 'display_name', None) == new_name:
+            return new_name
+    except Exception:
+        pass
+    try:
+        for attempt in range(3):
+            try:
+                compute_client.update_instance(
+                    instance_id=instance_id,
+                    update_instance_details=oci.core.models.UpdateInstanceDetails(
+                        display_name=new_name
+                    )
+                )
+                add_log(f"Instance renamed to '{new_name}' (was '{current.display_name if current else '?'}')")
+                return new_name
+            except oci.exceptions.ServiceError as e:
+                # 400 InvalidParameter on a transient lifecycle event — retry.
+                if getattr(e, 'status', 0) in (400, 404, 409, 429, 500, 503) and attempt < 2:
+                    time.sleep(2 + attempt * 2)
+                    continue
+                raise
+    except Exception as e:
+        msg = str(e)[:160]
+        add_log(f"Could not rename instance to its public IP ({msg}); leaving original name")
+        return None
+    return None
+
+
 def list_all_instances(config, compute_client, identity_client, network_client=None):
     tenancy = config['tenancy']
     instances = compute_client.list_instances(compartment_id=tenancy).data
@@ -1094,9 +1162,20 @@ def run_automated_creation(config, account_config, compute_client, network_clien
                     add_log(f"Public IP: {public_ip}")
                 elif ip_err:
                     add_log(f"Could not get public IP: {ip_err}")
+                # Auto-rename the new instance to its public IP so the OCI Console
+                # shows the same identifier users actually SSH to. Best-effort —
+                # a failed rename logs a warning but never aborts the loop.
+                final_name = target_name
+                rename_enabled = _env_bool('RENAME_INSTANCE_TO_IP', True)
+                if not isinstance(account_config.get('rename_to_ip'), type(None)):
+                    rename_enabled = bool(account_config.get('rename_to_ip'))
+                if rename_enabled and public_ip:
+                    new_name = rename_instance_to_ip(compute_client, instance_id, public_ip)
+                    if new_name:
+                        final_name = new_name
                 success = True
                 if telegram_bot_token and telegram_chat_id:
-                    instance_name = account_config.get('display_name', 'AlwaysFree-Bot')
+                    instance_name = final_name
                     shape = account_config.get('shape', 'Unknown')
                     region = config.get('region', 'unknown')
                     user_time = format_user_time(tz_name=get_current_tz())
@@ -1802,10 +1881,26 @@ def launch_from_boot_volume():
         response = compute_client.launch_instance(instance_details)
         instance_id = response.data.id
         add_log(f"Instance launched from boot volume: {instance_id[:20]}...")
+        # Auto-rename the new instance to its public IP (best-effort, opt-out via
+        # RENAME_INSTANCE_TO_IP env or 'rename_to_ip' field in the request).
+        public_ip, ip_err = get_instance_public_ip(config, compute_client, network_client, instance_id)
+        final_name = display_name
+        rename_enabled = _env_bool('RENAME_INSTANCE_TO_IP', True)
+        if not isinstance(data.get('rename_to_ip'), type(None)):
+            rename_enabled = bool(data.get('rename_to_ip'))
+        if rename_enabled and public_ip:
+            add_log(f"Public IP: {public_ip}")
+            new_name = rename_instance_to_ip(compute_client, instance_id, public_ip)
+            if new_name:
+                final_name = new_name
+        elif ip_err:
+            add_log(f"Could not get public IP: {ip_err}")
         return jsonify({
             'success': True,
             'instance_id': instance_id,
-            'message': 'Instance launched from existing boot volume'
+            'name': final_name,
+            'public_ip': public_ip,
+            'message': f"Instance launched from existing boot volume (renamed to '{final_name}')"
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
