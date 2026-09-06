@@ -119,6 +119,27 @@ APP_PASSWORD=changeme python app.py
 # http://localhost:5000
 ```
 
+## Uninstall
+
+`uninstall.sh` removes the app from the machine and/or cleans up the OCI resources it created. Dry-run is safe — nothing is deleted without your confirmation.
+
+```bash
+./uninstall.sh                        # interactive: choose app and/or OCI cleanup
+./uninstall.sh --app-only             # stop app, remove .venv/caches (keeps source) — add --purge-dir to delete the repo too
+./uninstall.sh --oci-only --dry-run   # preview which OCI resources match (instances, boot volumes)
+./uninstall.sh --oci-only --yes       # terminate app instances + delete their boot volumes
+./uninstall.sh --all --vcn            # remove app AND its bootstrap VCN/subnet/IGW
+```
+
+**What it removes**
+
+| Scope | Behavior |
+|---|---|
+| App (local) | Stops the process on `--port` (default 5000), removes `.venv`/`venv`, `__pycache__`, `*.pyc`. Optional `--cron` (crontab lines referencing this repo), `--docker` (matching `oci-sniper`/`oci-provisioner` containers/images), `--purge-dir` (delete the repo dir). |
+| OCI resources | Uses your `~/.oci/config` (OCI CLI + `jq` required). Terminates instances and deletes boot volumes whose name matches the app's patterns — default `AlwaysFree-Bot`, `Resized-Instance`, or an IP (`10.0.0.5`). `--keep-boot-volumes` preserves volumes; `--vcn` also deletes the `provisioner-vcn`/subnet/IGW created by *Create subnet* (refuses automatically if the VCN holds other subnets unless `--force-vcn`); `--name-pattern` overrides the match. |
+
+> ⚠️ Instances/boot volumes renamed by you or not matching these patterns are **never** touched. `--preserve-boot-volume` is used appropriately: volumes are deleted only when they match and you didn't pass `--keep-boot-volumes`.
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -140,7 +161,7 @@ APP_PASSWORD=changeme python app.py
 3. Pick shape (A1.Flex OCPU/memory or Micro), boot volume (50–200 GB), SSH public key → **Start provisioning loop**.
 4. Watch the live terminal; get Telegram ping on success. Loop stops via **Stop** or `MAX_ATTEMPTS`.
 5. Manage instances from the quota panel: reboot / delete single, or DELETE ALL (type-to-confirm).
-6. **Boot volumes:** *Scan volumes* → Detach from a stopped instance, **re-attach** a detached volume to an existing instance in the same AD (optional start after attach), delete, or launch a new instance from a detached volume.
+6. **Boot volumes:** *Scan volumes* → Detach from a stopped instance, **re-attach** a detached volume to an existing instance in the same AD (optional start after attach), **Resize** (grow in place to any custom size up to 32 TB — optionally stop/start the attached instance automatically), delete, or launch a new instance from a detached volume (optionally grown to a custom size first). Sizes above 200 GB exceed the Always Free quota.
 
 > **Tip:** for A1.Flex, request the full 4 OCPU / 24 GB — if that's taken, drop to 2/12 and let the loop grab it. Both configs fit the free tier.
 
@@ -233,7 +254,8 @@ All endpoints JSON. POST bodies take `user`, `tenancy`, `fingerprint`, `region`,
 
 **Input validation**
 - `/api/open-firewall`: CIDR format, port range 1–65535, direction checked before mutating security lists
-- Boot volume clamped 50–200 GB; Flex OCPUs/memory clamped to free-tier maxima (4/24)
+- Boot volume clamped 50–200 GB when launching; Flex OCPUs/memory clamped to free-tier maxima (4/24)
+- Boot volume **resize (grow in place)** via `UpdateBootVolume`: custom size 50 GB–32 TB, no terminate/relaunch, data preserved; optional auto stop/start of the attached instance, and a custom size can be set when launching from an existing volume
 
 **Robustness & UX**
 - `/api/logs` tolerates garbage offset params; dev server threaded, debug off

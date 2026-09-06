@@ -1827,6 +1827,140 @@ def delete_boot_volume():
         return jsonify({'success': False, 'error': str(e)})
 
 
+@app.route('/api/resize-boot-volume', methods=['POST'])
+@require_auth
+def resize_boot_volume():
+    """Grow a boot volume in place to a custom size (50 GB - 32 TB, increase only).
+
+    Unlike the old terminate/relaunch workaround, this uses UpdateBootVolume and
+    keeps the existing volume (and its data). Optionally stops an attached
+    instance first for an offline resize, and can start it again afterwards.
+    """
+    data = request.json or {}
+    set_user_tz(data.get('timezone'))
+    config = build_config(data)
+    boot_volume_id = data.get('boot_volume_id')
+    try:
+        new_size_gb = int(data.get('new_size_gb', 0))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'new_size_gb must be a whole number of GB'})
+    stop_instance = bool(data.get('stop_instance', False))
+    start_after = bool(data.get('start_after', False))
+
+    if not boot_volume_id:
+        return jsonify({'success': False, 'error': 'boot_volume_id required'})
+    if new_size_gb < 50:
+        return jsonify({'success': False, 'error': 'Minimum boot volume size is 50 GB'})
+    if new_size_gb > 32768:
+        return jsonify({'success': False, 'error': 'Maximum boot volume size is 32 TB (32768 GB)'})
+
+    try:
+        oci.config.validate_config(config)
+        compute_client = oci.core.ComputeClient(config)
+        block_client = oci.core.BlockstorageClient(config)
+        tenancy = config['tenancy']
+
+        vol = block_client.get_boot_volume(boot_volume_id=boot_volume_id).data
+        vol_name = vol.display_name or boot_volume_id[:20]
+        vol_state = getattr(vol, 'lifecycle_state', 'UNKNOWN')
+        if vol_state in ('TERMINATED', 'TERMINATING', 'FAULTY'):
+            return jsonify({'success': False, 'error': f"Boot volume '{vol_name}' is {vol_state}"})
+        current_gb = int(getattr(vol, 'size_in_gbs', 0) or 0)
+        if new_size_gb <= current_gb:
+            return jsonify({
+                'success': False,
+                'error': f"New size must be larger than the current size ({current_gb} GB). OCI only supports growing a boot volume."
+            })
+
+        # Find the attachment (if any) so we can optionally stop the instance first.
+        attached_instance = None
+        attachment = None
+        try:
+            att_list = compute_client.list_boot_volume_attachments(
+                compartment_id=tenancy, availability_domain=vol.availability_domain
+            ).data
+            attachment = next(
+                (a for a in att_list
+                 if a.boot_volume_id == boot_volume_id
+                 and a.lifecycle_state in ('ATTACHED', 'ATTACHING')),
+                None
+            )
+            if attachment:
+                attached_instance = compute_client.get_instance(instance_id=attachment.instance_id).data
+        except Exception:
+            pass
+
+        instance_name = attached_instance.display_name if attached_instance else None
+        stopped_by_us = False
+        if (attached_instance and stop_instance
+                and attached_instance.lifecycle_state in ('RUNNING', 'STARTING')):
+            add_log(f"Stopping instance '{instance_name}' before boot volume resize...")
+            compute_client.instance_action(instance_id=attached_instance.id, action='STOP')
+            inst = _wait_instance_state(compute_client, attached_instance.id, 'STOPPED',
+                                        attempts=120, delay=3)
+            if inst is None or inst.lifecycle_state != 'STOPPED':
+                return jsonify({
+                    'success': False,
+                    'error': f"Instance '{instance_name}' did not reach STOPPED "
+                             f"(state: {inst.lifecycle_state if inst else 'UNKNOWN'}). Resize aborted."
+                })
+            stopped_by_us = True
+
+        add_log(f"Resizing boot volume '{vol_name}': {current_gb} GB -> {new_size_gb} GB...")
+        if new_size_gb > 200:
+            add_log("Note: sizes above 200 GB exceed the Always Free boot volume quota and may incur charges.")
+        block_client.update_boot_volume(
+            boot_volume_id=boot_volume_id,
+            update_boot_volume_details=oci.core.models.UpdateBootVolumeDetails(
+                size_in_gbs=new_size_gb
+            )
+        )
+
+        # Wait (best effort) until the new size is reflected on the volume.
+        actual_size = new_size_gb
+        for _ in range(60):
+            cur = block_client.get_boot_volume(boot_volume_id=boot_volume_id).data
+            actual_size = int(getattr(cur, 'size_in_gbs', new_size_gb) or new_size_gb)
+            if actual_size >= new_size_gb:
+                break
+            time.sleep(2)
+
+        started = False
+        if stopped_by_us and start_after:
+            add_log(f"Starting instance '{instance_name}' after boot volume resize...")
+            compute_client.instance_action(instance_id=attached_instance.id, action='START')
+            started = True
+
+        add_log(f"Boot volume resize initiated: '{vol_name}' {current_gb} GB -> {new_size_gb} GB")
+        msg = f"Resize initiated: {current_gb} GB -> {new_size_gb} GB"
+        if instance_name:
+            state_note = 'unchanged'
+            if stopped_by_us and started:
+                state_note = 'restarting'
+            elif stopped_by_us:
+                state_note = 'stopped'
+            msg += f" (volume on '{instance_name}': {state_note})"
+        return jsonify({
+            'success': True,
+            'message': msg,
+            'current_size_gb': current_gb,
+            'new_size_gb': actual_size,
+            'instance_name': instance_name,
+            'instance_id': attached_instance.id if attached_instance else None,
+            'instance_stopped': stopped_by_us,
+            'instance_started': started,
+            'over_200_gb': actual_size > 200
+        })
+    except oci.exceptions.ServiceError as e:
+        hint = ''
+        if e.code in ('InvalidParameter', 'BadRequest', 'InvalidRequest'):
+            hint = (" Hint: if the volume is attached, enable 'Stop instance before resize' "
+                    "and try again (offline resize).")
+        return jsonify({'success': False, 'error': f"OCI error {e.code}: {e.message}{hint}"})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
 @app.route('/api/launch-from-boot-volume', methods=['POST'])
 @require_auth
 def launch_from_boot_volume():
