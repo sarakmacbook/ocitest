@@ -131,6 +131,7 @@ APP_PASSWORD=changeme python app.py
 | `KEEP_ALIVE` | `true` | Self-ping daemon that keeps free-tier hosts (Render etc.) from sleeping. |
 | `KEEP_ALIVE_INTERVAL` | `600` | Ping interval in seconds (min 60). 600s = every 10 min. |
 | `KEEP_ALIVE_URL` | *(auto)* | Public base URL to ping. Auto-detected from `RENDER_EXTERNAL_URL` on Render; set explicitly on other platforms, e.g. `https://your-app.onrender.com`. |
+| `RENAME_INSTANCE_TO_IP` | `true` | After a successful launch (auto-launch loop **or** "Launch from existing boot volume"), automatically rename the new instance's `display_name` to its public IP. Keeps the OCI Console identifier in sync with the IP you actually SSH to. Per-request override: send `rename_to_ip: false` in the launch body to opt out of a single launch. |
 
 ## How to use
 
@@ -187,6 +188,11 @@ All endpoints JSON. POST bodies take `user`, `tenancy`, `fingerprint`, `region`,
 | Image dropdown empty | Your region may lack Ubuntu images for that shape — enable *all OS* mode or pick another shape. |
 
 ## Changelog v5.0.2 → v5.0.3
+
+**New instance name now matches the public IP**
+- Right after a successful launch (both the auto-launch loop and "Launch from existing boot volume") the sniper fetches the new instance's public IP and renames it via `UpdateInstance(display_name=…)`. The OCI Console, the Telegram success alert and the boot-volume launch response all surface the IP as the new name (e.g. `150.230.45.67`) so the console label matches the IP you actually SSH to.
+- Best-effort: a failed rename logs a warning but never aborts the loop. Invalid / empty IPs and unresolvable IPs are skipped, and the name is sanitized to OCI's allowed character set (`A-Za-z0-9._-`, ≤255 chars).
+- Opt-out globally with `RENAME_INSTANCE_TO_IP=false`, or per-request by sending `"rename_to_ip": false` in the launch payload. Default is on.
 
 **Boot volume re-attach**
 - New `POST /api/attach-boot-volume` attaches a detached boot volume to an existing instance in the same availability domain. Stops the instance if it is running, waits until the volume is AVAILABLE, refuses if the instance already has a boot volume, then optionally starts the instance (`start_after`).
