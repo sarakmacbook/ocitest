@@ -134,7 +134,7 @@ tg_live_last_sent = 0
 tg_live_min_interval = 3
 
 
-def add_log(message, to_telegram=True):
+def add_log(message):
     tz = get_current_tz()
     timestamp = format_user_time(tz_name=tz)
     line = f"[{timestamp}] {message}"
@@ -143,8 +143,7 @@ def add_log(message, to_telegram=True):
         global_logs.append(line)
         if len(global_logs) > 200:
             global_logs.pop(0)
-    if to_telegram:
-        _send_live_log_to_telegram(line)
+    _send_live_log_to_telegram(line)
 
 def _send_live_log_to_telegram(line):
     global tg_live_enabled, tg_live_bot_token, tg_live_chat_id, tg_live_last_sent
@@ -1149,13 +1148,11 @@ def run_automated_creation(config, account_config, compute_client, network_clien
                 add_log(f"Reached MAX_ATTEMPTS ({max_attempts}). Stopping provisioning loop.")
                 break
             current_ad = ad_list[ad_index % len(ad_list)] if ad_list else ''
-            # Compact per-attempt heartbeat — the one line streamed to Telegram:
-            # [2026-09-04 14:59:44] Attempt #19056 | user@example.com | AD: vxju:AP-BATAM-1-AD-1
-            user_part = oci_username if oci_username else 'unknown'
-            add_log(f"Attempt #{attempts} | {user_part} | AD: {current_ad}")
+            if len(ad_list) > 1:
+                add_log(f"Attempt {attempts}: trying AD '{current_ad}'...")
             instance_details.availability_domain = current_ad
             try:
-                add_log(f"Attempt {attempts}: sending instance launch request...", to_telegram=False)
+                add_log(f"Attempt {attempts}: sending instance launch request...")
                 response = compute_client.launch_instance(instance_details)
                 instance_id = response.data.id
                 add_log(f"SUCCESS! Instance created: {instance_id[:20]}...")
@@ -1205,14 +1202,14 @@ def run_automated_creation(config, account_config, compute_client, network_clien
                 msg = str(e)
                 code = getattr(e, 'code', 'N/A')
                 status = getattr(e, 'status', 'N/A')
-                add_log(f"Debug -> ServiceError code={code}, status={status}, msg={e.message[:120]}", to_telegram=False)
+                add_log(f"Debug -> ServiceError code={code}, status={status}, msg={e.message[:120]}")
                 if "Out of capacity" in msg or status in (500, 429, 503, 504):
                     user_info = f" [user: {oci_username}]" if oci_username else ""
-                    add_log(f"Capacity busy in '{target_region}' AD '{current_ad}'.{user_info} Retrying...", to_telegram=False)
+                    add_log(f"Capacity busy in '{target_region}' AD '{current_ad}'.{user_info} Retrying...")
                     if len(ad_list) > 1:
                         ad_index += 1
                         next_ad = ad_list[ad_index % len(ad_list)]
-                        add_log(f"Switching to next AD: '{next_ad}'", to_telegram=False)
+                        add_log(f"Switching to next AD: '{next_ad}'")
                 elif "NotAuthorizedOrNotFound" in msg or "Authorization failed" in msg or status == 404:
                     add_log(f"Auth/NotFound error — possible causes:")
                     add_log(f"  1. Image {image_id[:25]}... not found in AD {current_ad}")
@@ -1221,14 +1218,14 @@ def run_automated_creation(config, account_config, compute_client, network_clien
                     add_log(f"  4. Check OCI Console > Instances > Create — test manually")
                     if len(ad_list) > 1:
                         ad_index += 1
-                        add_log(f"Trying next AD after delay...", to_telegram=False)
+                        add_log(f"Trying next AD after delay...")
                     else:
                         break
                 else:
                     add_log(f"OCI API error: {e.message}")
                     if len(ad_list) > 1:
                         ad_index += 1
-                        add_log(f"Trying next AD after delay...", to_telegram=False)
+                        add_log(f"Trying next AD after delay...")
                     else:
                         break
             except (ConnectionError, OSError) as e:
@@ -1245,7 +1242,7 @@ def run_automated_creation(config, account_config, compute_client, network_clien
             actual_delay = retry_delay
             if randomize_delay:
                 actual_delay = random.randint(random_min, random_max)
-                add_log(f"Dynamic retry: waiting {actual_delay}s (randomized {random_min}-{random_max}s)", to_telegram=False)
+                add_log(f"Dynamic retry: waiting {actual_delay}s (randomized {random_min}-{random_max}s)")
             if stop_event.wait(actual_delay):
                 add_log("Provisioning loop stopped while waiting.")
                 break
