@@ -1,5 +1,6 @@
 import os
 import re
+import html
 import time
 import random
 import threading
@@ -132,6 +133,61 @@ tg_live_bot_token = None
 tg_live_chat_id = None
 tg_live_last_sent = 0
 tg_live_min_interval = 3
+# Context shown at the top of every live Telegram loop card.
+tg_live_attempt = 0
+tg_live_location = None
+tg_live_user = None
+tg_live_region = None
+
+
+def _tg_escape(value):
+    """HTML-escape a value so it is safe inside Telegram parse_mode=HTML."""
+    return html.escape(str(value), quote=False)
+
+
+def _extract_oci_email(oci_user):
+    """Pull the email address out of an OCI username/identity string if present."""
+    if not oci_user:
+        return ""
+    match = re.search(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', str(oci_user))
+    return match.group(0) if match else str(oci_user)
+
+
+def _set_tg_live_ctx(attempt=None, location=None, user=None, region=None):
+    """Update the context shown in the live Telegram loop card."""
+    global tg_live_attempt, tg_live_location, tg_live_user, tg_live_region
+    with tg_live_lock:
+        if attempt is not None:
+            try:
+                tg_live_attempt = int(attempt)
+            except (TypeError, ValueError):
+                pass
+        if location is not None:
+            tg_live_location = location
+        if user is not None:
+            tg_live_user = user
+        if region is not None:
+            tg_live_region = region
+
+
+def _reset_tg_live_ctx():
+    _set_tg_live_ctx(attempt=0, location=None, user=None, region=None)
+
+
+def _tg_live_context_block():
+    """Build the Attempt / OCI Email / Region / Location header."""
+    parts = []
+    if tg_live_attempt:
+        parts.append(f"<b>Attempt:</b> {tg_live_attempt}")
+    if tg_live_user:
+        parts.append(f"<b>OCI Email:</b> {_tg_escape(_extract_oci_email(tg_live_user))}")
+    if tg_live_region:
+        parts.append(f"<b>Region:</b> {_tg_escape(tg_live_region)}")
+    if tg_live_location:
+        parts.append(f"<b>Location:</b> {_tg_escape(tg_live_location)}")
+    if parts:
+        return "\n".join(parts) + "\n"
+    return ""
 
 
 def add_log(message):
@@ -156,12 +212,16 @@ def _send_live_log_to_telegram(line):
         tg_live_last_sent = now
     try:
         clean_msg = line
-        if len(clean_msg) > 4000:
-            clean_msg = clean_msg[:4000] + "..."
+        context = _tg_live_context_block()
+        header = "🔁 <b>OCI Sniper Loop</b>\n\n"
+        body = context + "\n" + f"<code>{_tg_escape(clean_msg)}</code>" if context else f"<code>{_tg_escape(clean_msg)}</code>"
+        text = header + body
+        if len(text) > 4000:
+            text = text[:4000] + "..."
         url = f"https://api.telegram.org/bot{tg_live_bot_token}/sendMessage"
         payload = {
             "chat_id": tg_live_chat_id,
-            "text": f"<code>{clean_msg}</code>",
+            "text": text,
             "parse_mode": "HTML"
         }
         requests.post(url, json=payload, timeout=5)
@@ -1035,6 +1095,7 @@ def run_automated_creation(config, account_config, compute_client, network_clien
     oci_username = None
     target_region = config.get('region', 'unknown')
     target_name = account_config.get('display_name', 'AlwaysFree-Bot')
+    _set_tg_live_ctx(attempt=0, location=None, region=target_region)
     # Honor MAX_ATTEMPTS cap. 0 or negative == unlimited. A per-request override
     # may be supplied via account_config['max_attempts'].
     max_attempts = MAX_ATTEMPTS
@@ -1050,6 +1111,7 @@ def run_automated_creation(config, account_config, compute_client, network_clien
         oci_username = get_oci_username(config, identity_client)
         if oci_username:
             add_log(f"OCI username detected: {oci_username}")
+        _set_tg_live_ctx(user=oci_username)
     except Exception as e:
         add_log(f"Could not detect OCI username: {str(e)}")
     try:
@@ -1148,6 +1210,7 @@ def run_automated_creation(config, account_config, compute_client, network_clien
                 add_log(f"Reached MAX_ATTEMPTS ({max_attempts}). Stopping provisioning loop.")
                 break
             current_ad = ad_list[ad_index % len(ad_list)] if ad_list else ''
+            _set_tg_live_ctx(attempt=attempts, location=current_ad)
             if len(ad_list) > 1:
                 add_log(f"Attempt {attempts}: trying AD '{current_ad}'...")
             instance_details.availability_domain = current_ad
@@ -1179,13 +1242,18 @@ def run_automated_creation(config, account_config, compute_client, network_clien
                     shape = account_config.get('shape', 'Unknown')
                     region = config.get('region', 'unknown')
                     user_time = format_user_time(tz_name=get_current_tz())
-                    user_line = f"<b>User:</b> {oci_username}\n" if oci_username else ""
-                    ip_line = f"<b>Public IP:</b> {public_ip}\n" if public_ip else ""
+                    oci_email = _extract_oci_email(oci_username) if oci_username else ""
+                    user_line = f"<b>OCI Email:</b> {_tg_escape(oci_email)}\n" if oci_email else ""
+                    attempt_line = f"<b>Attempt:</b> {attempts}\n"
+                    location_line = f"<b>Location:</b> {_tg_escape(tg_live_location)}\n" if tg_live_location else ""
+                    ip_line = f"<b>Public IP:</b> {_tg_escape(public_ip)}\n" if public_ip else ""
                     tg_msg = (
                         f"&#9989; <b>OCI Provisioner Success!</b>\n\n"
-                        f"<b>Instance:</b> {instance_name}\n"
-                        f"<b>Shape:</b> {shape}\n"
-                        f"<b>Region:</b> {region}\n"
+                        f"{attempt_line}"
+                        f"<b>Instance:</b> {_tg_escape(instance_name)}\n"
+                        f"<b>Shape:</b> {_tg_escape(shape)}\n"
+                        f"<b>Region:</b> {_tg_escape(region)}\n"
+                        f"{location_line}"
                         f"{ip_line}"
                         f"{user_line}"
                         f"<b>Time:</b> {user_time}\n"
@@ -1249,13 +1317,18 @@ def run_automated_creation(config, account_config, compute_client, network_clien
         if not success:
             add_log("Provisioning loop ended without success.")
             if telegram_bot_token and telegram_chat_id:
-                user_line = f"<b>User:</b> {oci_username}\n" if oci_username else ""
+                oci_email = _extract_oci_email(oci_username) if oci_username else ""
+                user_line = f"<b>OCI Email:</b> {_tg_escape(oci_email)}\n" if oci_email else ""
+                attempt_line = f"<b>Attempt:</b> {attempts}\n"
+                location_line = f"<b>Location:</b> {_tg_escape(tg_live_location)}\n" if tg_live_location else ""
                 user_time = format_user_time(tz_name=get_current_tz())
                 tg_msg = (
                     f"&#10060; <b>OCI Provisioner Stopped</b>\n\n"
+                    f"{attempt_line}"
                     f"{user_line}"
+                    f"{location_line}"
                     f"Loop stopped after {attempts} attempts without success.\n"
-                    f"<b>Region:</b> {config.get('region', 'unknown')}\n"
+                    f"<b>Region:</b> {_tg_escape(config.get('region', 'unknown'))}\n"
                     f"<b>Time:</b> {user_time}"
                 )
                 send_telegram_message(telegram_bot_token, telegram_chat_id, tg_msg, get_current_tz())
@@ -1266,12 +1339,17 @@ def run_automated_creation(config, account_config, compute_client, network_clien
         else:
             add_log(f"Automation engine failure: {msg}")
         if telegram_bot_token and telegram_chat_id:
-            user_line = f"<b>User:</b> {oci_username}\n" if oci_username else ""
+            oci_email = _extract_oci_email(oci_username) if oci_username else ""
+            user_line = f"<b>OCI Email:</b> {_tg_escape(oci_email)}\n" if oci_email else ""
+            attempt_line = f"<b>Attempt:</b> {tg_live_attempt}\n" if tg_live_attempt else ""
+            location_line = f"<b>Location:</b> {_tg_escape(tg_live_location)}\n" if tg_live_location else ""
             user_time = format_user_time(tz_name=get_current_tz())
             tg_msg = (
                 f"&#10060; <b>OCI Provisioner Error</b>\n\n"
+                f"{attempt_line}"
                 f"{user_line}"
-                f"Automation engine failure:\n{msg[:200]}\n"
+                f"{location_line}"
+                f"Automation engine failure:\n{_tg_escape(msg[:200])}\n"
                 f"<b>Time:</b> {user_time}"
             )
             send_telegram_message(telegram_bot_token, telegram_chat_id, tg_msg, get_current_tz())
@@ -1325,6 +1403,8 @@ def auto_launch():
         tg_live_bot_token = bot_token if enable_live else None
         tg_live_chat_id = chat_id if enable_live else None
         tg_live_last_sent = 0
+    if enable_live:
+        _reset_tg_live_ctx()
     if enable_live and (not bot_token or not chat_id):
         return jsonify({'success': False, 'error': 'Telegram live log enabled but bot token or chat ID is missing'})
     with automation_lock:
@@ -1369,6 +1449,7 @@ def stop_loop():
     stop_event.set()
     with tg_live_lock:
         tg_live_enabled = False
+    _reset_tg_live_ctx()
     return jsonify({'success': True, 'message': 'Stop signal sent.'})
 
 
